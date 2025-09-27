@@ -1,4 +1,4 @@
-# Telegram WhisperX Transcription Bot 🤖
+# Telegram WhisperX Transcription Bot
 
 A simple yet powerful Telegram bot that uses the [WhisperX](https://github.com/m-bain/whisperX) model to transcribe any voice message or audio file you send to it.
 
