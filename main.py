@@ -1,5 +1,4 @@
 import logging
-import os
 import subprocess
 from config import config
 from pathlib import Path
