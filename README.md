@@ -32,9 +32,10 @@ Note: Telegram's Bot API only lets bots download files up to 20 MB.
 | `OVH_API_KEY`     | yes      |                          |
 | `ALLOWED_USER_ID` | yes      |                          |
 | `WHISPER_MODEL`   | no       | `whisper-large-v3-turbo` |
-| `LANGUAGE`        | no       | `de`                     |
+| `LANGUAGE`        | no       | empty = auto-detect      |
 
-If accuracy is poor, try `WHISPER_MODEL=whisper-large-v3`.
+By default the language is auto-detected per message (e.g. German and English both work).
+Set `LANGUAGE=de` (or `en`, …) to force one language. If accuracy is poor, try `WHISPER_MODEL=whisper-large-v3`.
 
 ## Run
 

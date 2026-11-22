@@ -11,7 +11,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 OVH_API_KEY = os.environ["OVH_API_KEY"]
 ALLOWED_USER_ID = int(os.environ["ALLOWED_USER_ID"])
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "whisper-large-v3-turbo")
-LANGUAGE = os.environ.get("LANGUAGE", "de")
+# Empty = let Whisper auto-detect the language per message (handles German and English).
+LANGUAGE = os.environ.get("LANGUAGE", "").strip()
 OVH_URL = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/audio/transcriptions"
 
 # Telegram allows 4096 chars per message; leave some headroom.
@@ -39,12 +40,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def transcribe(path: Path) -> str:
     """Sends the audio file to the OVHcloud Whisper endpoint and returns the text."""
+    data = {"model": WHISPER_MODEL}
+    if LANGUAGE:
+        data["language"] = LANGUAGE
     async with httpx.AsyncClient(timeout=300) as client:
         with path.open("rb") as f:
             r = await client.post(
                 OVH_URL,
                 headers={"Authorization": f"Bearer {OVH_API_KEY}"},
-                data={"model": WHISPER_MODEL, "language": LANGUAGE},
+                data=data,
                 files={"file": (path.name, f)},
             )
     r.raise_for_status()
