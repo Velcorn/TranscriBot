@@ -1,128 +1,127 @@
 import logging
-import subprocess
-from config import config
+import os
+import tempfile
 from pathlib import Path
+
+import httpx
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+OVH_API_KEY = os.environ["OVH_API_KEY"]
+ALLOWED_USER_ID = int(os.environ["ALLOWED_USER_ID"])
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "whisper-large-v3-turbo")
+LANGUAGE = os.environ.get("LANGUAGE", "de")
+OVH_URL = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/audio/transcriptions"
 
-# Load bot token from config
-BOT_TOKEN = config()['bot_token']
-# Choose your WhisperX model. "base" is fast, "large-v2" is more accurate.
-WHISPER_MODEL = "large-v2"
-# Optional: Set this to your Telegram user ID to make the bot private
-ALLOWED_USER_ID = None
+# Telegram allows 4096 chars per message; leave some headroom.
+CHUNK_SIZE = 4000
 
-# Set up logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
+# httpx logs every request URL at INFO, which includes the bot token for Telegram calls.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message when the /start command is issued."""
+    if update.message.from_user.id != ALLOWED_USER_ID:
+        return
     await update.message.reply_html(
         "Hello! I'm your personal transcription bot.\n\n"
-        "Forward any voice message or audio file to me, and I'll transcribe it for you using WhisperX."
+        "Forward any voice message or audio file to me, and I'll transcribe it for you "
+        "using the OVHcloud Whisper API."
     )
+
+
+async def transcribe(path: Path) -> str:
+    """Sends the audio file to the OVHcloud Whisper endpoint and returns the text."""
+    async with httpx.AsyncClient(timeout=300) as client:
+        with path.open("rb") as f:
+            r = await client.post(
+                OVH_URL,
+                headers={"Authorization": f"Bearer {OVH_API_KEY}"},
+                data={"model": WHISPER_MODEL, "language": LANGUAGE},
+                files={"file": (path.name, f)},
+            )
+    r.raise_for_status()
+    return r.json()["text"].strip()
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles voice messages and audio files for transcription."""
-    # Check if the user is allowed (if privacy is enabled)
-    if ALLOWED_USER_ID and update.message.from_user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access denied for {update.message.from_user.id}.")
+    user_id = update.message.from_user.id
+    if user_id != ALLOWED_USER_ID:
+        logger.warning("Unauthorized access denied for %s.", user_id)
         return
 
-    # Let the user know the bot is working on it
-    processing_message = await update.message.reply_text("Downloading and processing... Please wait.")
+    processing_message = await update.message.reply_text("Downloading... Please wait.")
 
-    input_audio_path = None # Define here to ensure it's available in 'finally'
+    input_audio_path = None
     try:
         file_id = None
-        file_extension = ".tmp" # Default extension
+        file_extension = ".tmp"
         if update.message.voice:
             file_id = update.message.voice.file_id
             file_extension = ".ogg"
         elif update.message.audio:
             file_id = update.message.audio.file_id
             if update.message.audio.file_name:
-                # Use Path to get the suffix from the original filename
-                file_extension = Path(update.message.audio.file_name).suffix
+                file_extension = Path(update.message.audio.file_name).suffix or file_extension
 
         if not file_id:
             await processing_message.edit_text("Sorry, I couldn't find an audio file in that message.")
             return
 
-        input_audio_path = Path(f"input_{file_id}{file_extension}")
-        
+        input_audio_path = Path(tempfile.gettempdir()) / f"input_{file_id}{file_extension}"
         audio_file = await context.bot.get_file(file_id)
         await audio_file.download_to_drive(input_audio_path)
-        logger.info(f"Downloaded audio file to {input_audio_path}")
+        logger.info("Downloaded audio file to %s", input_audio_path)
 
-        await processing_message.edit_text("Transcribing with WhisperX... this may take a moment.")
-        
-        # Run WhisperX using subprocess
-        command = [
-            "whisperx",
-            str(input_audio_path),
-            "--model", WHISPER_MODEL,
-            "--compute_type", "int8",
-            "--language", "de"
-        ]
-        
-        process = subprocess.run(command, capture_output=True, text=True, check=False)
-
-        if process.returncode != 0:
-            logger.error(f"WhisperX Error: {process.stderr}")
-            await processing_message.edit_text(f"An error occurred during transcription.\n\n<pre>{process.stderr}</pre>", parse_mode='HTML')
+        await processing_message.edit_text("Transcribing…")
+        text = await transcribe(input_audio_path)
+        if not text:
+            await processing_message.edit_text("(no speech detected)")
             return
 
-        # Read the transcription result
-        transcription_file_path = input_audio_path.with_suffix(".txt")
-        
-        if transcription_file_path.exists():
-            transcription = transcription_file_path.read_text(encoding='utf-8')
-            logger.info("Transcription successful.")
-            await processing_message.edit_text(transcription, parse_mode='Markdown')
-        else:
-            await processing_message.edit_text("Could not find the transcription output file.")
+        logger.info("Transcription successful (%d chars).", len(text))
+        # Plain text, NOT Markdown: transcripts can contain * _ etc.
+        chunks = [text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+        await processing_message.edit_text(chunks[0])
+        for chunk in chunks[1:]:
+            await update.message.reply_text(chunk)
 
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
-        await processing_message.edit_text(f"An unexpected error occurred: {e}")
-    
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            "OVH API error: HTTP %s - %s", e.response.status_code, e.response.text[:300]
+        )
+        await processing_message.edit_text("Transcription failed, see logs.")
+    except Exception:
+        logger.exception("An unexpected error occurred.")
+        await processing_message.edit_text("Transcription failed, see logs.")
+
     finally:
         if input_audio_path and input_audio_path.exists():
-            # Get the base name of the file without any extension (e.g., "input_123")
-            file_stem = input_audio_path.stem
-            parent_dir = input_audio_path.parent
-
-            # Find and delete all files starting with that same base name
-            logger.info(f"Cleaning up files matching pattern: {file_stem}*")
-            for file_to_remove in parent_dir.glob(f"{file_stem}*"):
-                try:
-                    if file_to_remove.is_file():
-                        file_to_remove.unlink()
-                        logger.info(f"Removed: {file_to_remove}")
-                except Exception as e:
-                    logger.error(f"Error removing file {file_to_remove}: {e}")
+            try:
+                input_audio_path.unlink()
+                logger.info("Removed: %s", input_audio_path)
+            except Exception as e:
+                logger.error("Error removing file %s: %s", input_audio_path, e)
 
 
 def main() -> None:
     """Start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
 
-    # Start the Bot
     logger.info("Bot is starting...")
     application.run_polling()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

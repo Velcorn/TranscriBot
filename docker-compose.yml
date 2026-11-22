@@ -1,0 +1,6 @@
+services:
+  transcribot:
+    build: .
+    container_name: transcribot
+    restart: unless-stopped
+    env_file: .env
